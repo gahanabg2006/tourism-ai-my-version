@@ -769,6 +769,43 @@ img {
   display: flex;
   gap: 8px;
 }
+.agent-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 20px;
+  white-space: nowrap;
+  color: var(--gray-light);
+  background: rgba(184, 201, 206, 0.12);
+}
+.agent-status-verified { color: var(--success); background: rgba(76,175,125,0.14); }
+.agent-status-unregistered, .agent-status-mismatch, .agent-status-invalid_account { color: var(--coral); background: rgba(255, 107, 74, 0.14); }
+.agent-status-unavailable { color: var(--yellow); background: rgba(255, 200, 61, 0.12); }
+.agent-status-simulated { color: var(--lagoon); background: rgba(34, 211, 197, 0.12); }
+.agent-verify-note { font-size: 12px; color: var(--gray); line-height: 1.5; }
+.agent-verify-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--dark-border);
+  font-size: 12px;
+}
+.agent-verify-reason { color: var(--white); line-height: 1.5; }
+.agent-verify-checks { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.agent-verify-checks li { display: grid; grid-template-columns: 44px 1fr; gap: 2px 8px; color: var(--gray-light); }
+.agent-verify-check-status { font-family: var(--font-mono); font-size: 10px; font-weight: 700; grid-row: span 2; }
+.check-pass .agent-verify-check-status { color: var(--success); }
+.check-fail .agent-verify-check-status { color: var(--coral); }
+.check-skip .agent-verify-check-status { color: var(--gray); }
+.agent-verify-check-detail { font-family: var(--font-mono); font-size: 10px; color: var(--gray); word-break: break-all; }
+.agent-verify-meta { color: var(--gray); font-size: 11px; word-break: break-all; }
+.agent-verify-meta a { color: var(--lagoon); text-decoration: underline; }
 .btn-sm-yellow {
   flex: 1;
   display: inline-flex;

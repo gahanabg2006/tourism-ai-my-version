@@ -47,6 +47,7 @@ import { SendEmailModal } from "../components/SendEmailModal";
 import { OfflineRemoteModal } from "../components/OfflineRemoteModal";
 import { ExperienceRatingWidget } from "../components/ExperienceRatingWidget";
 import PinMap, { MAP_PINS, formatCoord } from "../components/PinMap";
+import { ITINERARY_AGENT_ASSET, SOLANA_CLUSTER, TOURISM_PROGRAM_ID, explorerUrl } from "../lib/solana-config";
 import {
   downloadOfflinePassFile,
   printOfflinePass,
@@ -475,6 +476,16 @@ const DESTINATIONS: DestinationItem[] = [
 
 const ALL_TAGS = ["All", "Heritage Pick", "Trending", "Budget Friendly"];
 
+// Labels for /api/agents verification statuses (server is the source of truth).
+const AGENT_STATUS_LABELS: Record<string, string> = {
+  verified: "Verified on-chain",
+  unregistered: "Not registered",
+  mismatch: "Identity mismatch",
+  invalid_account: "Invalid identity account",
+  unavailable: "Check unavailable",
+  simulated: "Demo · not registered",
+};
+
 // ─── Dynamic AI Destination Generator for ANY User Search ───────────────────
 function createCustomDestination(query: string): DestinationItem {
   const clean = query.trim().charAt(0).toUpperCase() + query.trim().slice(1);
@@ -794,7 +805,7 @@ export default function Home() {
         crowd: generatedPlan.crowd,
         pace: generatedPlan.pace,
         transit: generatedPlan.transitPass,
-        agentAsset: "CnhuTNUvdwn6aMKjwDFhmQujf1E8j9xqQ2xLCR7ZXXbn",
+        agentAsset: ITINERARY_AGENT_ASSET,
         timestamp: Date.now(),
       };
       
@@ -808,12 +819,13 @@ export default function Home() {
           wallet as any,
           { commitment: "confirmed", preflightCommitment: "confirmed" }
         );
-        const program = new Program(tourismIdl as any, provider);
+        const program = new Program({ ...tourismIdl, address: TOURISM_PROGRAM_ID } as unknown as Idl, provider);
         const commitmentKeypair = Keypair.generate();
-        
+
+        // .rpc() resolves only after the wallet signs and the cluster confirms the transaction.
         const tx = await (program.methods as any)
           .commitItinerary(
-            new PublicKey("CnhuTNUvdwn6aMKjwDFhmQujf1E8j9xqQ2xLCR7ZXXbn"),
+            new PublicKey(ITINERARY_AGENT_ASSET),
             hashArray,
             `${plannerCity.name} (${generatedPlan.numDays}D Tailored)`
           )
@@ -836,7 +848,7 @@ export default function Home() {
         setSavedRecords(updated);
         try { sessionStorage.setItem("prooftrip_records", JSON.stringify(updated)); } catch {}
       } else {
-        await new Promise(r => setTimeout(r, 850));
+        // No wallet: issue an off-chain certificate (local SHA-256 reference). Nothing is sent to Solana.
         const certTx = `CERT-${hashHex.slice(0, 8).toUpperCase()}-${hashHex.slice(8, 16).toUpperCase()}`;
         setCustomCommitTx(certTx);
         const newRec = {
@@ -851,7 +863,12 @@ export default function Home() {
       }
     } catch (err: any) {
       console.error("Custom commit error:", err);
-      setCustomCommitError(err?.message || "Verification service temporarily unavailable. Secure certificate active.");
+      const msg = String(err?.message || err || "");
+      setCustomCommitError(
+        /reject|declin|cancel/i.test(msg) || err?.name === "WalletSignTransactionError"
+          ? "Transaction was rejected in your wallet. Nothing was submitted to Solana."
+          : `On-chain commit failed — nothing was recorded. ${msg || "Unknown error."}`
+      );
     } finally {
       setCustomCommitLoading(false);
     }
@@ -861,10 +878,7 @@ export default function Home() {
   const { connection } = useConnection();
   const wallet = useWallet();
   const { setVisible: openWalletModal } = useWalletModal();
-  const [commitLoading, setCommitLoading] = useState(false);
-  const [autoCertifying, setAutoCertifying] = useState(false);
-  const [commitTx, setCommitTx] = useState<string | null>(null);
-  const [commitError, setCommitError] = useState("");
+  const [commitTx] = useState<string | null>(null);
   const [savedRecords, setSavedRecords] = useState<Array<{ dest: string; tx: string; hash: string; time: string }>>([]);
 
   // Active or Fallback Itinerary Plan for Download/Email
@@ -943,8 +957,10 @@ export default function Home() {
   const [agents, setAgents] = useState<any[]>([]);
   const [agentsLoading, setAgentsLoading] = useState(false);
   const [agentStatus, setAgentStatus] = useState("");
-  const [verifiedAsset, setVerifiedAsset] = useState<string | null>(null);
+  const [agentStatusTone, setAgentStatusTone] = useState<"yellow" | "green" | "red">("yellow");
+  const [verifyResults, setVerifyResults] = useState<Record<string, any>>({});
   const [verifyingAsset, setVerifyingAsset] = useState<string | null>(null);
+  const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
 
   // Price checker
   const [priceService, setPriceService] = useState("Auto-rickshaw");
@@ -985,140 +1001,62 @@ export default function Home() {
 
   async function loadAgents() {
     setAgentsLoading(true);
-    setAgentStatus("Connecting to Verified Concierge Network...");
+    setAgentStatus("Querying the Metaplex Agent Registry and verifying identities on Solana...");
+    setAgentStatusTone("yellow");
     try {
       const res = await fetch("/api/agents?query=travel", { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      if (data.data?.agents?.length) {
-        setAgents(data.data.agents);
-        setAgentStatus(`✓ Connected — ${data.data.agents.length} certified travel concierges online`);
-      } else {
-        setAgents([]);
-        setAgentStatus("Network query returned 0 concierges. Try refreshing.");
-      }
+      const list = Array.isArray(data.data?.agents) ? data.data.agents : [];
+      setAgents(list);
+      // Server verification is the source of truth; drop stale per-card results from earlier checks.
+      setVerifyResults({});
+      const s = data.summary || {};
+      const parts = [
+        `${s.verified ?? 0} verified on ${data.cluster || "devnet"}`,
+        s.unverified ? `${s.unverified} unverified` : "",
+        s.unavailable ? `${s.unavailable} could not be checked` : "",
+        s.simulated ? `${s.simulated} demo personas (not registered)` : "",
+      ].filter(Boolean);
+      const errs: string[] = Array.isArray(data.errors) ? data.errors : [];
+      setAgentStatus(list.length ? `${parts.join(" · ")}${errs.length ? ` — ${errs.join(" ")}` : ""}` : "No agents returned.");
+      setAgentStatusTone(errs.length ? "red" : (s.verified ?? 0) > 0 ? "green" : "yellow");
     } catch (e: any) {
-      setAgentStatus("Network connection error: " + e.message);
+      setAgents([]);
+      setAgentStatus("Could not load agents: " + (e?.message || String(e)));
+      setAgentStatusTone("red");
     } finally {
       setAgentsLoading(false);
     }
   }
 
-  // ── Verify Agent On-Chain ──
+  // ── Verify Agent On-Chain (live re-check via /api/agents/verify) ──
   async function verifyAgentOnChain(mintAddress: string) {
     setVerifyingAsset(mintAddress);
+    setExpandedAgent(mintAddress);
     try {
-      const res = await fetch(`/api/agents/verify?asset=${mintAddress}`);
-      const data = await res.json();
-      if (data.registered || data.verified) setVerifiedAsset(mintAddress);
-      else setVerifiedAsset(null);
-    } catch { /* ignore */ }
-    finally { setVerifyingAsset(null); }
+      const res = await fetch(`/api/agents/verify?asset=${encodeURIComponent(mintAddress)}`, { cache: "no-store" });
+      const data = await res.json().catch(() => ({}));
+      setVerifyResults(prev => ({
+        ...prev,
+        [mintAddress]: res.ok || res.status === 503
+          ? data
+          : { status: "unavailable", verified: false, reason: data?.error || `HTTP ${res.status}`, checks: [] },
+      }));
+    } catch (e: any) {
+      setVerifyResults(prev => ({
+        ...prev,
+        [mintAddress]: { status: "unavailable", verified: false, reason: `Network error: ${e?.message || e}`, checks: [] },
+      }));
+    } finally {
+      setVerifyingAsset(null);
+    }
   }
 
   // ── SHA-256 Hash ──
   async function sha256hex(text: string): Promise<string> {
     const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
     return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
-  }
-
-  // ── Unified Devnet Commit Flow (Never fails or blocks users without wallet) ──
-  async function handleCommitItinerary() {
-    // If user has Phantom / Solflare connected, commit via their wallet
-    if (wallet.publicKey) {
-      const programIdStr = process.env.NEXT_PUBLIC_TOURISM_PROGRAM_ID || "A7yU8i4YBUmnR5fZUxxC88ytFe59XkZGvqN1tj34VSzN";
-      setCommitLoading(true);
-      setCommitError("");
-      setCommitTx(null);
-      try {
-        const provider = new AnchorProvider(connection, wallet as never, { commitment: "confirmed" });
-        const program = new Program({ ...tourismIdl, address: programIdStr } as unknown as Idl, provider);
-        const itineraryText = `${selectedDest.tripTitle} | ${selectedDest.name} | ${selectedDest.duration} | stops:${selectedDest.stops.map(s => s.name).join(",")}`;
-        const hashHex = await sha256hex(itineraryText);
-        const hashBytes = Array.from(Buffer.from(hashHex, "hex"));
-        const agentAsset = new PublicKey("CnhuTNUvdwn6aMKjwDFhmQujf1E8j9xqQ2xLCR7ZXXbn");
-        const commitmentKeypair = Keypair.generate();
-        const tx = await (program.methods as any).commitItinerary(agentAsset, hashBytes, selectedDest.name)
-          .accounts({
-            commitment: commitmentKeypair.publicKey,
-            traveler: wallet.publicKey,
-            systemProgram: SystemProgram.programId,
-          })
-          .signers([commitmentKeypair])
-          .rpc();
-        setCommitTx(tx);
-        const rec = { dest: selectedDest.name, tx, hash: hashHex.slice(0, 16) + "...", time: new Date().toLocaleString() };
-        const updated = [rec, ...savedRecords].slice(0, 10);
-        setSavedRecords(updated);
-        sessionStorage.setItem("prooftrip_records", JSON.stringify(updated));
-      } catch (e: any) {
-        setCommitError(e.message || "Transaction failed");
-      } finally {
-        setCommitLoading(false);
-      }
-      return;
-    }
-
-    // If user does not have an external wallet connected, seamlessly issue a verified digital certificate!
-    await handleAutoCertify();
-  }
-
-  // ── Automated Digital Certificate Certification ──
-  async function handleAutoCertify() {
-    setAutoCertifying(true);
-    setCommitError("");
-    setCommitTx(null);
-    try {
-      const ephemeral = Keypair.generate();
-      const airdrop = await connection.requestAirdrop(ephemeral.publicKey, LAMPORTS_PER_SOL * 0.05);
-      await connection.confirmTransaction(airdrop, "confirmed");
-      const programIdStr = process.env.NEXT_PUBLIC_TOURISM_PROGRAM_ID || "A7yU8i4YBUmnR5fZUxxC88ytFe59XkZGvqN1tj34VSzN";
-      const itineraryText = `${selectedDest.tripTitle} | ${selectedDest.name} | ${selectedDest.duration} | stops:${selectedDest.stops.map(s => s.name).join(",")}`;
-      const hashHex = await sha256hex(itineraryText);
-      const hashBytes = Array.from(Buffer.from(hashHex, "hex"));
-      const agentAsset = new PublicKey("CnhuTNUvdwn6aMKjwDFhmQujf1E8j9xqQ2xLCR7ZXXbn");
-      const walletAdapter = {
-        publicKey: ephemeral.publicKey,
-        signTransaction: async (tx: Transaction) => { tx.partialSign(ephemeral); return tx; },
-        signAllTransactions: async (txs: Transaction[]) => txs.map(tx => { tx.partialSign(ephemeral); return tx; }),
-      };
-      const provider = new AnchorProvider(connection, walletAdapter as any, { commitment: "confirmed" });
-      const program = new Program({ ...tourismIdl, address: programIdStr } as unknown as Idl, provider);
-      const commitmentKeypair = Keypair.generate();
-      const tx = await (program.methods as any).commitItinerary(agentAsset, hashBytes, selectedDest.name)
-        .accounts({
-          commitment: commitmentKeypair.publicKey,
-          traveler: ephemeral.publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .signers([commitmentKeypair, ephemeral])
-        .rpc();
-      setCommitTx(tx);
-      const rec = { dest: selectedDest.name, tx, hash: hashHex.slice(0, 16) + "...", time: new Date().toLocaleString() };
-      const updated = [rec, ...savedRecords].slice(0, 10);
-      setSavedRecords(updated);
-      sessionStorage.setItem("prooftrip_records", JSON.stringify(updated));
-    } catch (e: any) {
-      try {
-        const itineraryText = `${selectedDest.tripTitle} | ${selectedDest.name} | ${selectedDest.duration} | stops:${selectedDest.stops.map(s => s.name).join(",")}`;
-        const hashHex = await sha256hex(itineraryText);
-        const certTx = "CERT-" + hashHex.slice(0, 8).toUpperCase() + "-" + hashHex.slice(8, 16).toUpperCase();
-        setCommitTx(certTx);
-        const rec = {
-          dest: selectedDest.name,
-          tx: certTx,
-          hash: hashHex.slice(0, 16) + "...",
-          time: new Date().toLocaleString()
-        };
-        const updated = [rec, ...savedRecords].slice(0, 10);
-        setSavedRecords(updated);
-        sessionStorage.setItem("prooftrip_records", JSON.stringify(updated));
-        setCommitError("");
-      } catch {
-        setCommitError("Verification error: " + (e.message || String(e)));
-      }
-    } finally {
-      setAutoCertifying(false);
-    }
   }
 
   // ── Price checker ──
@@ -2109,22 +2047,30 @@ export default function Home() {
                         <h3 style={{ fontSize: 18, fontWeight: 800, color: "#FFF" }}>Tamper-Proof Travel Agreement & Guarantee</h3>
                       </div>
                       <p style={{ fontSize: 13, color: "var(--gray-light)", lineHeight: 1.6, marginBottom: 20 }}>
-                        Your bespoke itinerary is authenticated by certified local travel concierges. Lock this agreement to secure guaranteed pricing, authentic landmark schedules, and tamper-proof fraud protection.
+                        Lock this agreement to record its SHA-256 fingerprint on Solana {SOLANA_CLUSTER} through the itinerary commitment program — your wallet signs and pays the network fee. Without a wallet, you get an off-chain certificate reference instead.
                       </p>
 
                       {customCommitTx && (
-                        <div className="status-box status-green" style={{ marginBottom: 16, fontSize: 13 }}>
-                          <div style={{ fontWeight: 800, marginBottom: 4 }}>✓ Travel Agreement Certified & Price Locked!</div>
-                          <div style={{ fontSize: 12, color: "var(--yellow)" }}>
-                            Certificate Reference: <code style={{ color: "#FFF" }}>{customCommitTx.startsWith("CERT-") ? customCommitTx : `CERT-${customCommitTx.slice(0, 16).toUpperCase()}`}</code>
+                        <div className={`status-box ${customCommitTx.startsWith("CERT-") ? "status-yellow" : "status-green"}`} style={{ marginBottom: 16, fontSize: 13 }}>
+                          <div style={{ fontWeight: 800, marginBottom: 4 }}>
+                            {customCommitTx.startsWith("CERT-")
+                              ? "Off-chain certificate created (not recorded on Solana)"
+                              : `✓ Itinerary hash committed and confirmed on Solana ${SOLANA_CLUSTER}`}
                           </div>
-                          {!customCommitTx.startsWith("CERT-") && (
+                          <div style={{ fontSize: 12, color: "var(--yellow)", wordBreak: "break-all" }}>
+                            {customCommitTx.startsWith("CERT-") ? "Certificate Reference" : "Transaction Signature"}: <code style={{ color: "#FFF" }}>{customCommitTx}</code>
+                          </div>
+                          {customCommitTx.startsWith("CERT-") ? (
+                            <div style={{ fontSize: 12, color: "var(--gray-light)", marginTop: 4 }}>
+                              Connect a wallet and lock again to anchor this itinerary on-chain.
+                            </div>
+                          ) : (
                             <a
-                              href={`https://explorer.solana.com/tx/${customCommitTx}?cluster=devnet`}
+                              href={explorerUrl("tx", customCommitTx)}
                               target="_blank" rel="noreferrer"
                               style={{ color: "var(--yellow)", textDecoration: "underline", display: "inline-flex", alignItems: "center", gap: 4, marginTop: 4 }}
                             >
-                              View Verified Certificate on Ledger <ExternalLink size={12} />
+                              View transaction on Solana Explorer <ExternalLink size={12} />
                             </a>
                           )}
                           <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
@@ -2469,7 +2415,7 @@ export default function Home() {
             <>
               {plannerCity && (
                 <div className="status-box status-yellow" style={{ marginBottom: 24, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span>📍 Active Destination: <strong>{plannerCity.name}, {plannerCity.country}</strong> {plannerCity.flag} — Showing certified tourism concierges and guides.</span>
+                  <span>📍 Active Destination: <strong>{plannerCity.name}, {plannerCity.country}</strong> {plannerCity.flag} — Showing registry agents verified live on Solana, plus demo concierge personas.</span>
                   <button className="btn-sm-dark" onClick={() => { setActiveTab("discover"); setPlannerStep(5); }}>
                     Back to Plan
                   </button>
@@ -2477,10 +2423,10 @@ export default function Home() {
               )}
               <div className="section-header">
                 <div>
-                  <div className="section-label">✦ Certified Travel Network</div>
-                  <h2 className="section-title">Verified Travel Concierges</h2>
+                  <div className="section-label">✦ Metaplex Agent Registry</div>
+                  <h2 className="section-title">Agents & Travel Concierges</h2>
                   <p className="section-sub">
-                    Authentic local guides, cultural specialists, and booking concierges verified with cryptographic credentials.
+                    Registry agents are checked live against their on-chain Agent Identity. Demo concierges are labelled and have no on-chain identity.
                   </p>
                 </div>
                 <button className="btn-dark" style={{ width: "auto", padding: "10px 20px" }} onClick={loadAgents} disabled={agentsLoading}>
@@ -2490,70 +2436,112 @@ export default function Home() {
               </div>
 
               {agentStatus && (
-                <div className="status-box status-yellow" style={{ marginBottom: 24 }}>{agentStatus}</div>
+                <div className={`status-box status-${agentStatusTone}`} style={{ marginBottom: 24 }}>{agentStatus}</div>
               )}
 
               {agentsLoading ? (
                 <div className="empty-state">
                   <div style={{ marginBottom: 16 }}><Loader2 size={32} className="animate-spin" color="var(--yellow)" /></div>
-                  <p>Connecting to Verified Concierge Network...</p>
+                  <p>Querying the agent registry and verifying identities on Solana...</p>
                 </div>
               ) : agents.length === 0 ? (
                 <div className="empty-state">
                   <div className="empty-state-icon">🤖</div>
-                  <h3>No concierges found</h3>
-                  <p>The network query returned 0 results. Try refreshing.</p>
+                  <h3>No agents found</h3>
+                  <p>The registry query returned no agents. Try refreshing.</p>
                 </div>
               ) : (
                 <div className="agents-grid">
-                  {agents.map((agent, i) => (
-                    <div
-                      key={agent.mintAddress || i}
-                      className={`agent-card ${verifiedAsset === agent.mintAddress ? "verified-card" : ""}`}
-                    >
-                      <div className="agent-card-top">
-                        <div className="agent-icon">
-                          {agent.verifiedOnDevnet ? "✅" : "🌐"}
+                  {agents.map((agent, i) => {
+                    const v = (agent.mintAddress && verifyResults[agent.mintAddress]) || agent.verification || {};
+                    const status: string = v.status || "unavailable";
+                    const expanded = !!agent.mintAddress && expandedAgent === agent.mintAddress;
+                    return (
+                      <div
+                        key={agent.id || agent.mintAddress || i}
+                        className={`agent-card ${status === "verified" ? "verified-card" : ""}`}
+                      >
+                        <div className="agent-card-top">
+                          <div className="agent-icon">
+                            {status === "simulated" ? "🧪" : status === "verified" ? "✅" : status === "unavailable" ? "⚠️" : "❔"}
+                          </div>
+                          <span className={`agent-status-badge agent-status-${status}`}>
+                            {status === "verified" && <CheckCircle size={11} />}
+                            {AGENT_STATUS_LABELS[status] || AGENT_STATUS_LABELS.unavailable}
+                          </span>
                         </div>
-                        {verifiedAsset === agent.mintAddress ? (
-                          <span className="agent-badge-verified"><CheckCircle size={11} /> Verified</span>
-                        ) : (
-                          <span className="agent-badge-devnet" style={{ background: "rgba(20, 241, 149, 0.15)", color: "#14F195" }}>Certified</span>
-                        )}
-                      </div>
-                      <div>
-                        <div className="agent-name">{agent.displayName || agent.name}</div>
-                        <div className="agent-specialty">{agent.specialty || "Travel & Tourism"}</div>
-                      </div>
-                      <p className="agent-desc">{agent.description}</p>
-                      {agent.mintAddress && (
+                        <div>
+                          <div className="agent-name">{agent.displayName || agent.name}</div>
+                          <div className="agent-specialty">{agent.specialty || "Travel & Tourism"}</div>
+                        </div>
+                        <p className="agent-desc">{agent.description}</p>
                         <div className="agent-addr" style={{ fontSize: 11, color: "var(--gray)" }}>
-                          Credential ID: #{agent.mintAddress.slice(0, 8).toUpperCase()}-{agent.mintAddress.slice(-4).toUpperCase()}
+                          {agent.mintAddress
+                            ? <>Asset: {agent.mintAddress.slice(0, 6)}…{agent.mintAddress.slice(-6)}</>
+                            : <>Demo data · no on-chain identity</>}
                         </div>
-                      )}
-                      <div className="agent-actions">
-                        <button
-                          className="btn-sm-yellow"
-                          disabled={verifyingAsset === agent.mintAddress}
-                          onClick={() => verifyAgentOnChain(agent.mintAddress)}
-                        >
-                          {verifyingAsset === agent.mintAddress
-                            ? <><Loader2 size={12} className="animate-spin" /> Verifying...</>
-                            : <><CheckCircle size={12} /> Verify Credentials</>}
-                        </button>
-                        {agent.mintAddress && (
-                          <a
-                            href={`https://explorer.solana.com/address/${agent.mintAddress}?cluster=devnet`}
-                            target="_blank" rel="noreferrer"
-                            className="btn-sm-dark"
-                            title="View Official Credential Record"
-                          >
-                            <ExternalLink size={12} />
-                          </a>
+                        {agent.mintAddress ? (
+                          <div className="agent-actions">
+                            <button
+                              className="btn-sm-yellow"
+                              disabled={verifyingAsset === agent.mintAddress}
+                              onClick={() => verifyAgentOnChain(agent.mintAddress)}
+                            >
+                              {verifyingAsset === agent.mintAddress
+                                ? <><Loader2 size={12} className="animate-spin" /> Verifying...</>
+                                : <><RefreshCw size={12} /> Re-verify on-chain</>}
+                            </button>
+                            <button
+                              className="btn-sm-dark"
+                              onClick={() => setExpandedAgent(expanded ? null : agent.mintAddress)}
+                              aria-expanded={expanded}
+                            >
+                              {expanded ? "Hide details" : "Details"}
+                            </button>
+                            <a
+                              href={explorerUrl("address", agent.mintAddress)}
+                              target="_blank" rel="noreferrer"
+                              className="btn-sm-dark"
+                              title="View asset on Solana Explorer"
+                            >
+                              <ExternalLink size={12} />
+                            </a>
+                          </div>
+                        ) : (
+                          <div className="agent-verify-note">{v.reason || "Demo persona — not registered in the Metaplex Agent Registry."}</div>
+                        )}
+                        {expanded && (
+                          <div className="agent-verify-details">
+                            <div className="agent-verify-reason">{v.reason || "No verification result."}</div>
+                            {Array.isArray(v.checks) && v.checks.length > 0 && (
+                              <ul className="agent-verify-checks">
+                                {v.checks.map((c: any, ci: number) => (
+                                  <li key={ci} className={`check-${String(c.status).toLowerCase()}`}>
+                                    <span className="agent-verify-check-status">{c.status}</span>
+                                    <span>{c.check}</span>
+                                    <span className="agent-verify-check-detail">{c.detail}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                            {v.identityPda && (
+                              <div className="agent-verify-meta">
+                                Identity PDA:{" "}
+                                <a href={explorerUrl("address", v.identityPda)} target="_blank" rel="noreferrer">
+                                  {v.identityPda.slice(0, 8)}…{v.identityPda.slice(-6)}
+                                </a>
+                                {v.identity?.version ? ` · AgentIdentityV${v.identity.version}` : ""}
+                                {v.assetAccount?.name ? ` · On-chain name: ${v.assetAccount.name}` : ""}
+                              </div>
+                            )}
+                            {v.checkedAt && (
+                              <div className="agent-verify-meta">Checked {new Date(v.checkedAt).toLocaleTimeString()} on {v.cluster || "devnet"}</div>
+                            )}
+                          </div>
                         )}
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </>
@@ -2802,19 +2790,25 @@ export default function Home() {
                     <div key={i} className="record-card">
                       <div className="record-icon">✓</div>
                       <div className="record-body">
-                        <div className="record-dest">{rec.dest} — Certified Travel Agreement</div>
-                        <div className="record-hash">Certificate ID: {rec.tx.startsWith("CERT-") ? rec.tx : `CERT-${rec.tx.slice(0, 16).toUpperCase()}`} · Hash: {rec.hash}</div>
+                        <div className="record-dest">
+                          {rec.dest} — {rec.tx.startsWith("CERT-") ? "Off-chain certificate" : `On-chain commitment (${SOLANA_CLUSTER})`}
+                        </div>
+                        <div className="record-hash">
+                          {rec.tx.startsWith("CERT-") ? `Certificate ID: ${rec.tx}` : `Tx: ${rec.tx.slice(0, 16)}…`} · Hash: {rec.hash}
+                        </div>
                         <div className="record-time">{rec.time}</div>
                       </div>
-                      <a
-                        href={rec.tx.startsWith("CERT-")
-                          ? "https://explorer.solana.com/address/A7yU8i4YBUmnR5fZUxxC88ytFe59XkZGvqN1tj34VSzN?cluster=devnet"
-                          : `https://explorer.solana.com/tx/${rec.tx}?cluster=devnet`}
-                        target="_blank" rel="noreferrer"
-                        className="record-link"
-                      >
-                        <ExternalLink size={13} /> View Digital Certificate
-                      </a>
+                      {rec.tx.startsWith("CERT-") ? (
+                        <span className="record-link" style={{ opacity: 0.7 }}>Not on-chain</span>
+                      ) : (
+                        <a
+                          href={explorerUrl("tx", rec.tx)}
+                          target="_blank" rel="noreferrer"
+                          className="record-link"
+                        >
+                          <ExternalLink size={13} /> View Transaction
+                        </a>
+                      )}
                     </div>
                   ))}
                 </div>

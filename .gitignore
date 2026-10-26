@@ -7,3 +7,4 @@ node_modules/
 web/.env.local
 target/
 .DS_Store
+*.tsbuildinfo
