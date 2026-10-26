@@ -46,6 +46,7 @@ import LanguageSelectorModal from "../components/LanguageSelectorModal";
 import { SendEmailModal } from "../components/SendEmailModal";
 import { OfflineRemoteModal } from "../components/OfflineRemoteModal";
 import { ExperienceRatingWidget } from "../components/ExperienceRatingWidget";
+import PinMap, { MAP_PINS, formatCoord } from "../components/PinMap";
 import {
   downloadOfflinePassFile,
   printOfflinePass,
@@ -513,6 +514,7 @@ export default function Home() {
   const [selectedDest, setSelectedDest] = useState<DestinationItem>(DESTINATIONS[0]);
   const [heroThumb, setHeroThumb] = useState(0);
   const [mounted, setMounted] = useState(false);
+  const [mapPinId, setMapPinId] = useState<string>("srinagar");
 
   // ── Bespoke Trip Customizer Wizard State ──
   const [plannerCity, setPlannerCity] = useState<CuratedCity | null>(null);
@@ -1175,6 +1177,24 @@ export default function Home() {
     }
   }, [filteredDests, selectedDest.id]);
 
+  // ── Explore map selection (kept separate from selectedDest so tag filters can't reset it) ──
+  const pinNames = useMemo(() => Object.fromEntries(DESTINATIONS.map(d => [d.id, d.name])), []);
+  const mapDest = DESTINATIONS.find(d => d.id === mapPinId) ?? DESTINATIONS[0];
+  const mapPin = MAP_PINS.find(p => p.id === mapDest.id);
+
+  // ── Trending card tilt (pointer-driven CSS variables) ──
+  const handleTilt = (e: React.MouseEvent<HTMLElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width - 0.5;
+    const y = (e.clientY - r.top) / r.height - 0.5;
+    e.currentTarget.style.setProperty("--tilt-x", `${(-y * 8).toFixed(2)}deg`);
+    e.currentTarget.style.setProperty("--tilt-y", `${(x * 10).toFixed(2)}deg`);
+  };
+  const resetTilt = (e: React.MouseEvent<HTMLElement>) => {
+    e.currentTarget.style.removeProperty("--tilt-x");
+    e.currentTarget.style.removeProperty("--tilt-y");
+  };
+
   // ─────────────────────────────────────────────────────────────────────────
   // RENDER
   // ─────────────────────────────────────────────────────────────────────────
@@ -1202,8 +1222,8 @@ export default function Home() {
                   height: 38,
                   borderRadius: 10,
                   objectFit: "contain",
-                  boxShadow: "0 2px 10px rgba(248, 208, 87, 0.25)",
-                  border: "1px solid rgba(248, 208, 87, 0.35)",
+                  boxShadow: "0 2px 10px rgba(255, 200, 61, 0.25)",
+                  border: "1px solid rgba(255, 200, 61, 0.35)",
                 }}
               />
             </div>
@@ -1974,6 +1994,28 @@ export default function Home() {
                       </div>
                     </div>
 
+                    {/* Day 1 ticket-style route strip */}
+                    {generatedPlan.days[0] && (
+                      <div className="ia-ticket" aria-label={`Day 1 route in ${generatedPlan.city}`}>
+                        <div className="ia-ticket-stub">
+                          <span className="ia-ticket-kicker">Day 1 · Route pass</span>
+                          <span className="ia-ticket-city">{generatedPlan.city}</span>
+                          <span className="ia-mono ia-ticket-meta">
+                            {generatedPlan.days[0].stops.length} stops · {generatedPlan.numDays} day{generatedPlan.numDays > 1 ? "s" : ""}
+                          </span>
+                        </div>
+                        <ol className="ia-ticket-route">
+                          {generatedPlan.days[0].stops.map((stop: any, sIdx: number) => (
+                            <li key={sIdx} className="ia-ticket-stop">
+                              <span className="ia-mono ia-ticket-time">{String(stop.time).split(" (")[0]}</span>
+                              <span className="ia-ticket-dot" />
+                              <span className="ia-ticket-name">{stop.name}</span>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    )}
+
                     {/* Day by Day Schedule */}
                     <div style={{ marginBottom: 32 }}>
                       <div className="field-label" style={{ marginBottom: 16 }}>Day-by-Day Route & Scheduled Sights</div>
@@ -2059,7 +2101,7 @@ export default function Home() {
 
                     {/* Digital Travel Certificate & Price Lock Guarantee */}
                     <div style={{
-                      background: "rgba(248, 208, 87, 0.05)", border: "2px solid rgba(248, 208, 87, 0.35)",
+                      background: "rgba(255, 200, 61, 0.05)", border: "2px solid rgba(255, 200, 61, 0.35)",
                       borderRadius: 18, padding: "28px", marginBottom: 24,
                     }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
@@ -2180,26 +2222,25 @@ export default function Home() {
             /* DISCOVERY CATALOG (Select any city to customize)          */
             /* ══════════════════════════════════════════════════════════ */
             <>
-              {/* Hero Section */}
-              <section className="hero" style={{ paddingTop: "var(--nav-h)" }}>
-                <div
-                  className="hero-bg"
-                  style={{ backgroundImage: `url('${selectedDest.heroImg || FALLBACK_HERO}')` }}
+              {/* ── Immersive Hero ── */}
+              <section className="ia-hero">
+                <img
+                  className="ia-hero-bg"
+                  src="/images/destinations/dal-lake.jpg"
+                  alt="Shikaras on Dal Lake, Srinagar"
+                  onError={(e) => { (e.target as HTMLImageElement).src = FALLBACK_HERO; }}
                 />
-                <div className="hero-gradient" />
-                <div className="hero-content">
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-                    <div className="hero-eyebrow" style={{ margin: 0 }}>
-                      <Sparkles size={13} />
-                      <span>Verified Travel Concierge · Guaranteed Price Integrity</span>
-                    </div>
+                <div className="ia-hero-shade" />
+                <div className="ia-hero-content">
+                  <div className="ia-hero-coord">
+                    <MapPin size={13} />
+                    <span>34.0837° N, 74.7973° E · Dal Lake, Srinagar</span>
                   </div>
-                  <h1 className="hero-title">
-                    {t.heroTitle}
+                  <p className="ia-hero-kicker">{t.heroTitle}</p>
+                  <h1 className="ia-hero-title">
+                    India<span className="ia-coral">,</span><br />Unfolded<span className="ia-saffron">.</span>
                   </h1>
-                  <p className="hero-sub">
-                    {t.heroSub}
-                  </p>
+                  <p className="ia-hero-sub">{t.heroSub}</p>
 
                   {/* Traveler Category Context Banner */}
                   {travelerType === "foreign" ? (
@@ -2223,7 +2264,7 @@ export default function Home() {
 
                   <div className="hero-actions">
                     <div className="hero-search">
-                      <Search size={16} color="#7A7A7A" />
+                      <Search size={16} color="var(--gray-light)" />
                       <input
                         placeholder={t.heroSearchPlaceholder}
                         value={searchQuery}
@@ -2247,59 +2288,105 @@ export default function Home() {
                       <ArrowRight size={16} />
                     </button>
                   </div>
+                </div>
 
-                  {/* Quick-Pick Popular City Chips */}
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 20 }}>
-                    <span style={{ fontSize: 12, color: "var(--gray-light)", fontWeight: 600 }}>Popular Destinations:</span>
-                    {[
-                      { name: "Mysuru", flag: "🇮🇳" },
-                      { name: "Jaipur", flag: "🇮🇳" },
-                      { name: "Agra", flag: "🇮🇳" },
-                      { name: "Delhi", flag: "🇮🇳" },
-                      { name: "Goa", flag: "🇮🇳" },
-                      { name: "Kerala", flag: "🇮🇳" },
-                      { name: "Varanasi", flag: "🇮🇳" },
-                      { name: "Ladakh", flag: "🇮🇳" },
-                      { name: "Srinagar", flag: "🇮🇳" },
-                    ].map(chip => (
-                      <button
-                        key={chip.name}
-                        onClick={() => handleSelectDestination(chip.name)}
-                        style={{
-                          background: "rgba(255, 255, 255, 0.08)",
-                          border: "1px solid rgba(255, 255, 255, 0.16)",
-                          borderRadius: 20,
-                          padding: "5px 13px",
-                          color: "#FFF",
-                          fontSize: 12,
-                          cursor: "pointer",
-                          display: "inline-flex",
-                          alignItems: "center",
-                          gap: 6,
-                          transition: "all 0.2s ease",
-                        }}
-                        onMouseEnter={(e) => {
-                          e.currentTarget.style.borderColor = "var(--yellow)";
-                          e.currentTarget.style.background = "rgba(248, 208, 87, 0.15)";
-                        }}
-                        onMouseLeave={(e) => {
-                          e.currentTarget.style.borderColor = "rgba(255, 255, 255, 0.16)";
-                          e.currentTarget.style.background = "rgba(255, 255, 255, 0.08)";
-                        }}
-                      >
-                        <span>{chip.flag}</span>
-                        <span>{chip.name}</span>
-                      </button>
-                    ))}
+                {/* Scrolling city marquee (second copy is decorative, for a seamless loop) */}
+                <div className="ia-marquee">
+                  <div className="ia-marquee-track">
+                    {[...DESTINATIONS, ...DESTINATIONS].map((d, i) => {
+                      const isCopy = i >= DESTINATIONS.length;
+                      return (
+                        <button
+                          key={`${d.id}-${i}`}
+                          type="button"
+                          className="ia-marquee-item"
+                          onClick={() => handleSelectDestination(d.name, d.heroImg)}
+                          tabIndex={isCopy ? -1 : undefined}
+                          aria-hidden={isCopy || undefined}
+                        >
+                          <span>{d.name}</span>
+                          <span className="ia-marquee-star">✦</span>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               </section>
 
-              {/* Destination cards */}
+              {/* ── Explore: stylised lat/lon pin map + detail panel ── */}
+              <section className="page-section">
+                <div className="section-header">
+                  <div>
+                    <div className="section-label">01 · Explore</div>
+                    <h2 className="section-title">Pick a pin. <span className="ia-coral">Plan the route.</span></h2>
+                    <p className="section-sub">Ten cities plotted at their real coordinates. Tap a pin to preview its route, then plan it.</p>
+                  </div>
+                </div>
+
+                <div className="ia-explore-grid">
+                  <PinMap names={pinNames} selectedId={mapDest.id} onSelect={setMapPinId} />
+
+                  <article className="ia-detail" key={mapDest.id}>
+                    <div className="ia-detail-photo">
+                      <img
+                        src={mapDest.heroImg}
+                        alt={mapDest.name}
+                        onError={(e) => { (e.target as HTMLImageElement).src = FALLBACK_HERO; }}
+                      />
+                      <span className="ia-detail-tag"><Star size={10} /> {mapDest.tag}</span>
+                    </div>
+                    <div className="ia-detail-body">
+                      {mapPin && <div className="ia-mono ia-detail-coord">{formatCoord(mapPin.lat, mapPin.lon)}</div>}
+                      <h3 className="ia-detail-name">{mapDest.name}</h3>
+                      <p className="ia-detail-tagline">{mapDest.tagline}</p>
+                      <dl className="ia-detail-stats">
+                        <div><dt>Duration</dt><dd>{mapDest.duration}</dd></div>
+                        <div><dt>Best season</dt><dd>{mapDest.bestSeason}</dd></div>
+                        <div><dt>Budget</dt><dd>{mapDest.price}</dd></div>
+                      </dl>
+                      <ol className="ia-detail-stops">
+                        {mapDest.stops.map(stop => (
+                          <li key={stop.name}>
+                            <span className="ia-mono">{stop.time}</span>
+                            <span>{stop.name}</span>
+                          </li>
+                        ))}
+                      </ol>
+                      <button
+                        className="btn-hero-yellow ia-btn-coral"
+                        onClick={() => handleSelectDestination(mapDest.name, mapDest.heroImg)}
+                      >
+                        <span>Plan this route</span>
+                        <ArrowRight size={16} />
+                      </button>
+                    </div>
+                  </article>
+                </div>
+
+                {/* Explore → Plan → Certify */}
+                <ol className="ia-flow">
+                  {[
+                    { n: "01", title: "Explore", text: "Pick a pin, a trending card or search any Indian city.", icon: <Compass size={18} /> },
+                    { n: "02", title: "Plan", text: "Choose sights, budget, transit pass, crowd vibe and pace.", icon: <Ticket size={18} /> },
+                    { n: "03", title: "Certify", text: "Lock your price with a verified concierge on Solana devnet.", icon: <ShieldCheck size={18} /> },
+                  ].map(step => (
+                    <li key={step.n} className="ia-flow-step">
+                      <span className="ia-flow-icon">{step.icon}</span>
+                      <div>
+                        <div className="ia-mono ia-flow-num">{step.n}</div>
+                        <div className="ia-flow-title">{step.title}</div>
+                        <p className="ia-flow-text">{step.text}</p>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              </section>
+
+              {/* ── Trending: tall tilt cards ── */}
               <div className="page-section">
                 <div className="section-header">
                   <div>
-                    <div className="section-label">✦ {t.navDiscover}</div>
+                    <div className="section-label">02 · {t.navDiscover}</div>
                     <h2 className="section-title">{t.curatedHeading}</h2>
                     <p className="section-sub">
                       {t.curatedSub}
@@ -2316,12 +2403,17 @@ export default function Home() {
                   </div>
                 </div>
 
-                <div className="destinations-grid">
+                <div className="destinations-grid ia-trend-grid">
                   {filteredDests.map(dest => (
                     <div
                       key={dest.id}
-                      className={`dest-card ${selectedDest.id === dest.id ? "selected" : ""}`}
+                      role="button"
+                      tabIndex={0}
+                      className={`dest-card ia-tilt ${selectedDest.id === dest.id ? "selected" : ""}`}
                       onClick={() => handleSelectDestination(dest.name, dest.heroImg)}
+                      onKeyDown={e => { if (e.key === "Enter") handleSelectDestination(dest.name, dest.heroImg); }}
+                      onMouseMove={handleTilt}
+                      onMouseLeave={resetTilt}
                     >
                       <div className="dest-card-photo">
                         <img
@@ -2338,21 +2430,11 @@ export default function Home() {
                         <Star size={10} /> {dest.tag}
                       </div>
                       <div className="dest-card-body">
+                        <div className="ia-mono ia-card-duration">{dest.duration} · {dest.bestSeason}</div>
                         <div className="dest-card-name">{dest.name}</div>
                         <div className="dest-card-price">{dest.price}</div>
                         <p className="dest-card-desc">{dest.tagline}</p>
-
-                        <div style={{
-                          marginTop: 12,
-                          paddingTop: 10,
-                          borderTop: "1px solid rgba(255,255,255,0.08)",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          fontSize: 12,
-                          color: "var(--yellow)",
-                          fontWeight: 700,
-                        }}>
+                        <div className="ia-card-cta">
                           <span>Plan & Customize Trip</span>
                           <ArrowRight size={14} />
                         </div>
@@ -2786,7 +2868,7 @@ export default function Home() {
               height: 30,
               borderRadius: 8,
               objectFit: "contain",
-              border: "1px solid rgba(248, 208, 87, 0.35)",
+              border: "1px solid rgba(255, 200, 61, 0.35)",
             }}
           />
           <span style={{ fontSize: 18, fontWeight: 900 }}>

@@ -76,8 +76,8 @@ export default function TravelerPersonaModal({
                     width: 52,
                     height: 52,
                     borderRadius: 14,
-                    border: "1.5px solid rgba(248, 208, 87, 0.4)",
-                    boxShadow: "0 4px 16px rgba(248, 208, 87, 0.25)",
+                    border: "1.5px solid rgba(255, 200, 61, 0.4)",
+                    boxShadow: "0 4px 16px rgba(255, 200, 61, 0.25)",
                     objectFit: "contain",
                   }}
                 />
