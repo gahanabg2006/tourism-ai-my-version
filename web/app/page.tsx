@@ -476,6 +476,9 @@ const DESTINATIONS: DestinationItem[] = [
 
 const ALL_TAGS = ["All", "Heritage Pick", "Trending", "Budget Friendly"];
 
+// Stays + dining per day for each budget tier (USD). Tickets and transit are added per selection.
+const TIER_DAILY_USD = { budget: 35, comfort: 95, luxury: 240 } as const;
+
 // Labels for /api/agents verification statuses (server is the source of truth).
 const AGENT_STATUS_LABELS: Record<string, string> = {
   verified: "Verified on-chain",
@@ -535,6 +538,8 @@ export default function Home() {
   const [selectedCurrency, setSelectedCurrency] = useState<string>("USD");
   const [budgetAmount, setBudgetAmount] = useState<number>(650);
   const [budgetTier, setBudgetTier] = useState<"budget" | "comfort" | "luxury">("comfort");
+  // true once the traveller types their own amount; until then the budget follows the selection
+  const [budgetEdited, setBudgetEdited] = useState(false);
   const [exchangeRates, setExchangeRates] = useState<Record<string, number>>({
     USD: 1, INR: 94.95, EUR: 0.893, GBP: 0.748, JPY: 156.8, AED: 3.67, SOL: 0.00984
   });
@@ -647,6 +652,25 @@ export default function Home() {
     setBudgetAmount(inNew);
   };
 
+  // Trip estimate from the places actually selected (same day/ticket rules as generateTailoredPlan).
+  const plannerEstimate = useMemo(() => {
+    if (!plannerCity) return null;
+    const chosen = plannerCity.attractions.filter(a => selectedAttractionIds.includes(a.id));
+    const active = chosen.length > 0 ? chosen : plannerCity.attractions.slice(0, 3);
+    const spotsPerDay = travelPace === "leisurely" ? 2 : 3;
+    const days = Math.max(1, Math.ceil(active.length / spotsPerDay));
+    const ticketsUSD = active.reduce((sum, a) => sum + a.costUSD, 0);
+    const transitUSD = plannerCity.transit.passPriceUSD * days;
+    const tierTotalUSD = (tier: keyof typeof TIER_DAILY_USD) => TIER_DAILY_USD[tier] * days + ticketsUSD + transitUSD;
+    return { places: active.length, days, ticketsUSD, transitUSD, tierTotalUSD, minimumUSD: ticketsUSD + transitUSD };
+  }, [plannerCity, selectedAttractionIds, travelPace]);
+
+  // Keep the budget in step with the selection until the traveller enters their own amount.
+  useEffect(() => {
+    if (!plannerEstimate || budgetEdited) return;
+    setBudgetAmount(convertAmount(plannerEstimate.tierTotalUSD(budgetTier), selectedCurrency));
+  }, [plannerEstimate, budgetTier, budgetEdited, selectedCurrency, convertAmount]);
+
   // Select destination and open curated customizer flow
   const handleSelectDestination = (cityName: string, fallbackHero?: string) => {
     const clean = cityName.trim();
@@ -664,6 +688,7 @@ export default function Home() {
     setBudgetAmount(convertedBudget);
     setBudget(convertedBudget);
     setBudgetTier("comfort");
+    setBudgetEdited(false);
 
     // Pre-populate expenses with transit pass and iconic attraction tickets
     const initialExpenses = [
@@ -1481,7 +1506,10 @@ export default function Home() {
 
                   <div className="wizard-footer-nav">
                     <div style={{ fontSize: 14, color: "var(--gray-light)" }}>
-                      <strong style={{ color: "var(--yellow)" }}>{selectedAttractionIds.length}</strong> attractions selected for {plannerCity.name}
+                      <strong style={{ color: "var(--yellow)" }}>{selectedAttractionIds.length}</strong> attraction{selectedAttractionIds.length === 1 ? "" : "s"} selected for {plannerCity.name}
+                      {plannerEstimate && selectedAttractionIds.length > 0 && (
+                        <> · {plannerEstimate.days} day{plannerEstimate.days > 1 ? "s" : ""} · tickets ≈ {convertAmount(plannerEstimate.ticketsUSD, selectedCurrency).toLocaleString()} {selectedCurrency}</>
+                      )}
                     </div>
                     <button
                       className="btn-hero-yellow"
@@ -1537,9 +1565,29 @@ export default function Home() {
                       type="number"
                       className="budget-input"
                       value={budgetAmount || ""}
-                      onChange={e => setBudgetAmount(Math.max(0, Number(e.target.value)))}
+                      onChange={e => { setBudgetEdited(true); setBudgetAmount(Math.max(0, Number(e.target.value))); }}
                     />
                   </div>
+
+                  {plannerEstimate && (
+                    <div
+                      className={`status-box ${getBudgetInUSD(budgetAmount, selectedCurrency) < plannerEstimate.minimumUSD ? "status-red" : "status-yellow"}`}
+                      style={{ marginBottom: 20, fontSize: 13, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}
+                    >
+                      <span>
+                        {getBudgetInUSD(budgetAmount, selectedCurrency) < plannerEstimate.minimumUSD
+                          ? `Budget is below the tickets + transit for your ${plannerEstimate.places} place${plannerEstimate.places > 1 ? "s" : ""} (${convertAmount(plannerEstimate.minimumUSD, selectedCurrency).toLocaleString()} ${selectedCurrency}).`
+                          : budgetEdited
+                            ? `Custom budget. Suggested for ${plannerEstimate.places} place${plannerEstimate.places > 1 ? "s" : ""} over ${plannerEstimate.days} day${plannerEstimate.days > 1 ? "s" : ""}: ${convertAmount(plannerEstimate.tierTotalUSD(budgetTier), selectedCurrency).toLocaleString()} ${selectedCurrency}.`
+                            : `Estimated for ${plannerEstimate.places} place${plannerEstimate.places > 1 ? "s" : ""} over ${plannerEstimate.days} day${plannerEstimate.days > 1 ? "s" : ""}: tickets ${convertAmount(plannerEstimate.ticketsUSD, selectedCurrency).toLocaleString()} + transit ${convertAmount(plannerEstimate.transitUSD, selectedCurrency).toLocaleString()} + stays & dining.`}
+                      </span>
+                      {budgetEdited && (
+                        <button className="btn-sm-dark" type="button" onClick={() => setBudgetEdited(false)}>
+                          Use estimate
+                        </button>
+                      )}
+                    </div>
+                  )}
 
                   {/* Preset Budget Tier Cards */}
                   <div className="budget-tiers-grid">
@@ -1547,39 +1595,36 @@ export default function Home() {
                       className={`budget-tier-card ${budgetTier === "budget" ? "selected" : ""}`}
                       onClick={() => {
                         setBudgetTier("budget");
-                        const amtUSD = 35 * plannerCity.durationDays;
-                        setBudgetAmount(convertAmount(amtUSD, selectedCurrency));
+                        setBudgetEdited(false);
                       }}
                     >
                       <div className="tier-icon">🎒</div>
                       <div className="tier-title">Backpacker / Economy</div>
-                      <div className="tier-estimate">~{convertAmount(35 * plannerCity.durationDays, selectedCurrency)} {selectedCurrency} total</div>
+                      <div className="tier-estimate">~{convertAmount(plannerEstimate ? plannerEstimate.tierTotalUSD("budget") : 35 * plannerCity.durationDays, selectedCurrency).toLocaleString()} {selectedCurrency} total</div>
                       <p className="tier-desc">Social boutique hostels, local thalis & authentic street eateries, city bus/metro transit pass.</p>
                     </div>
                     <div
                       className={`budget-tier-card ${budgetTier === "comfort" ? "selected" : ""}`}
                       onClick={() => {
                         setBudgetTier("comfort");
-                        const amtUSD = 95 * plannerCity.durationDays;
-                        setBudgetAmount(convertAmount(amtUSD, selectedCurrency));
+                        setBudgetEdited(false);
                       }}
                     >
                       <div className="tier-icon">🧳</div>
                       <div className="tier-title">Comfort / Explorer (Recommended)</div>
-                      <div className="tier-estimate">~{convertAmount(95 * plannerCity.durationDays, selectedCurrency)} {selectedCurrency} total</div>
+                      <div className="tier-estimate">~{convertAmount(plannerEstimate ? plannerEstimate.tierTotalUSD("comfort") : 95 * plannerCity.durationDays, selectedCurrency).toLocaleString()} {selectedCurrency} total</div>
                       <p className="tier-desc">3-4★ heritage stays, sit-down dining, day transit passes, all museum audio guides included.</p>
                     </div>
                     <div
                       className={`budget-tier-card ${budgetTier === "luxury" ? "selected" : ""}`}
                       onClick={() => {
                         setBudgetTier("luxury");
-                        const amtUSD = 240 * plannerCity.durationDays;
-                        setBudgetAmount(convertAmount(amtUSD, selectedCurrency));
+                        setBudgetEdited(false);
                       }}
                     >
                       <div className="tier-icon">👑</div>
                       <div className="tier-title">Luxury / Royal</div>
-                      <div className="tier-estimate">~{convertAmount(240 * plannerCity.durationDays, selectedCurrency)} {selectedCurrency} total</div>
+                      <div className="tier-estimate">~{convertAmount(plannerEstimate ? plannerEstimate.tierTotalUSD("luxury") : 240 * plannerCity.durationDays, selectedCurrency).toLocaleString()} {selectedCurrency} total</div>
                       <p className="tier-desc">5★ palace suites & villas, private chauffeured AC cabs, fine dining & VIP entry passes.</p>
                     </div>
                   </div>
@@ -1613,7 +1658,7 @@ export default function Home() {
                       <div className="fx-item">
                         <div className="fx-label">Daily Allocation</div>
                         <div className="fx-val" style={{ fontSize: 16 }}>
-                          ~{Math.round(budgetAmount / plannerCity.durationDays)} {selectedCurrency} / day
+                          ~{Math.round(budgetAmount / (plannerEstimate?.days || plannerCity.durationDays)).toLocaleString()} {selectedCurrency} / day
                         </div>
                       </div>
                     </div>
